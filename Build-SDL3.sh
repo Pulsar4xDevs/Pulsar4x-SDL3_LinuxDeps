@@ -1,29 +1,35 @@
 #!/bin/bash
 # Pulsar4X Native Deps Builder
-# Run this script whenever you want to update SDL3 + siblings.
-# Builds everything against the Steam Runtime (sniper) for best Linux compatibility.
+# Builds from edwardgushchin's forks using 'main' for natives and 'master' for SDL3-CS.
+# Patches both TargetFrameworks and LangVersion so it builds cleanly with .NET 8 SDK.
 
 set -euo pipefail
 
 # ================== CONFIGURATION ==================
-# ←←← Update these when you want to bump versions ←←←
-SDL_TAG="release-3.2.8"           # Change to the SDL3 version you want (e.g. release-3.4.0)
-SDL_IMAGE_TAG="prerelease-3.2.0"  # Usually tracks SDL3 version closely
-SDL_TTF_TAG="release-3.2.2"       # Current stable as of early 2026
-SDL3_CS_BRANCH="main"             # SDL3-CS has no real tags → use main or a specific commit hash
+SDL_BRANCH="main"           
+SDL_IMAGE_BRANCH="main"     
+SDL_TTF_BRANCH="main"       
+SDL3_CS_BRANCH="master"     
+
+TARGET_FRAMEWORK="net8.0"
+LANG_VERSION="12"                     # .NET 8 SDK max = C# 12
 
 BUILD_DIR="$(pwd)/build-dir"
 OUTPUT_DIR="$(pwd)/output"
 
 IMAGE="registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest"
+
+SDL_REPO="https://github.com/edwardgushchin/SDL.git"
+SDL_IMAGE_REPO="https://github.com/edwardgushchin/SDL_image.git"
+SDL_TTF_REPO="https://github.com/edwardgushchin/SDL_ttf.git"
+SDL3_CS_REPO="https://github.com/edwardgushchin/SDL3-CS.git"
 # ===================================================
 
-echo "=== Starting build in Steam Runtime SDK ==="
+echo -e "\e[34m=== Starting build in Steam Runtime SDK ===\e[0m"
 
 mkdir -p "$BUILD_DIR"
 mkdir -p "$OUTPUT_DIR"
 
-# Pull the latest SDK image
 docker pull "$IMAGE"
 
 docker run --rm \
@@ -31,6 +37,7 @@ docker run --rm \
   -v "$OUTPUT_DIR:/output" \
   "$IMAGE" /bin/bash -c "
     set -euo pipefail
+    set -x
 
     apt update
     apt install -y build-essential cmake git pkg-config wget \
@@ -48,52 +55,67 @@ docker run --rm \
 
     cd /work
 
-    echo '=== Building SDL3 ==='
+    # === Build SDL3 native ===
+    echo -e '\e[34m=== Build SDL3 native from fork (main) ===\e[0m'
     rm -rf SDL
-    git clone --depth 1 --branch $SDL_TAG https://github.com/libsdl-org/SDL.git
+    git clone --depth 1 --branch $SDL_BRANCH $SDL_REPO
     cd SDL
     mkdir build && cd build
     cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
     make -j\$(nproc)
     cp libSDL3.so* /output/
 
-    export PKG_CONFIG_PATH=/work/SDL/build:\$PKG_CONFIG_PATH
+    export PKG_CONFIG_PATH=\"/work/SDL/build\${PKG_CONFIG_PATH:+:\$PKG_CONFIG_PATH}\"
 
-    echo '=== Building SDL_image ==='
+    # === Build SDL_image ===
+    echo -e '\e[34m=== Build SDL_image from fork (main) ===\e[0m'
     cd /work
     rm -rf SDL_image
-    git clone --depth 1 --branch $SDL_IMAGE_TAG https://github.com/libsdl-org/SDL_image.git
+    git clone --depth 1 --branch $SDL_IMAGE_BRANCH $SDL_IMAGE_REPO
     cd SDL_image
     mkdir build && cd build
     cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
     make -j\$(nproc)
     cp libSDL3_image.so* /output/
 
-    echo '=== Building SDL_ttf ==='
+    # === Build SDL_ttf ===
+    echo -e '\e[34m=== Build SDL_ttf from fork (main) ===\e[0m'
     cd /work
     rm -rf SDL_ttf
-    git clone --depth 1 --branch $SDL_TTF_TAG https://github.com/libsdl-org/SDL_ttf.git
+    git clone --depth 1 --branch $SDL_TTF_BRANCH $SDL_TTF_REPO
     cd SDL_ttf
     mkdir build && cd build
     cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
     make -j\$(nproc)
     cp libSDL3_ttf.so* /output/
 
-    echo '=== Building SDL3-CS .dll ==='
+    # === Build SDL3-CS .dll ===
+    echo -e '\e[34m=== Build SDL3-CS .dll from master ===\e[0m'
     cd /work
     rm -rf SDL3-CS
-    git clone --depth 1 --branch $SDL3_CS_BRANCH https://github.com/edwardgushchin/SDL3-CS.git
-    cd SDL3-CS
-    dotnet build -c Release --no-self-contained
-    cp SDL3-CS/bin/Release/net8.0/SDL3-CS.dll /output/
+    git clone --depth 1 --branch $SDL3_CS_BRANCH $SDL3_CS_REPO
 
-    echo '=== All builds finished successfully ==='
+    MAIN_CSPROJ=\"SDL3-CS/SDL3-CS/SDL3-CS.csproj\"
+
+    # Patch both settings
+    sed -i \"s/<TargetFrameworks>.*<\/TargetFrameworks>/<TargetFrameworks>$TARGET_FRAMEWORK<\/TargetFrameworks>/\" \$MAIN_CSPROJ
+    sed -i \"s/<LangVersion>.*<\/LangVersion>/<LangVersion>$LANG_VERSION<\/LangVersion>/\" \$MAIN_CSPROJ
+
+    # === Feedback so we can see it worked ===
+    echo '=== After patching ==='
+    grep -E 'TargetFrameworks|LangVersion' \$MAIN_CSPROJ
+
+    # Build ONLY the main library (skip all examples)
+    dotnet build \$MAIN_CSPROJ -c Release --no-self-contained
+
+    cp SDL3-CS/SDL3-CS/bin/Release/$TARGET_FRAMEWORK/SDL3-CS.dll /output/
+
+    echo -e '\e[34m=== All builds finished successfully ===\e[0m'
   "
 
-echo "✅ Build complete!"
+echo -e "\e[34m✅ Build complete!\e[0m"
 echo "   Output files are in: $OUTPUT_DIR"
 echo ""
 echo "Next steps:"
-echo "   1. Copy the contents of output/ into Pulsar4X.Client/Libs/linux-x64/"
-echo "   2. Commit the updated .so + .dll files in the main project"
-echo "   3. (Optional) Update the version comments at the top of this script"
+echo "   1. Copy everything from output/ → Pulsar4X.Client/Libs/linux-x64/"
+echo "   2. Test the game on Linux"
